@@ -37,13 +37,22 @@ class RateLimitPlugin(base_plugin.BasePlugin):
         now = time.time()
         window = self.user_windows[user_id]
 
-        # TODO: Implement sliding window:
-        # 1. Pop timestamps older than (now - window_seconds) from the left
-        # 2. If len(window) >= max_requests:
-        #       wait = window_seconds - (now - window[0])
-        #       self.blocked_count += 1
-        #       return self._block_response(
-        #           f"Rate limit exceeded. Try again in {wait:.0f}s."
-        #       )
-        # 3. Else: append now, return None
-        raise NotImplementedError("Implement RateLimitPlugin.on_user_message_callback")
+        # Sliding window: chỉ giữ các mốc thời gian trong (now - window_seconds).
+        # Vì sao sliding thay vì fixed bucket: fixed bucket cho phép bùng nổ ở
+        # ranh giới cửa sổ (10 request cuối phút này + 10 đầu phút sau = 20
+        # trong 1 giây). Sliding window đo đúng "N request trong bất kỳ khoảng
+        # window_seconds nào".
+        cutoff = now - self.window_seconds
+        while window and window[0] <= cutoff:
+            window.popleft()
+
+        if len(window) >= self.max_requests:
+            # Đã đầy — chặn và cho biết còn bao lâu tới khi mốc cũ nhất hết hạn.
+            wait = self.window_seconds - (now - window[0])
+            self.blocked_count += 1
+            return self._block_response(
+                f"Rate limit exceeded. Try again in {wait:.0f}s."
+            )
+
+        window.append(now)
+        return None
