@@ -1,5 +1,21 @@
 # Day 11 — Controlled Agent Security (2026)
 
+> **Sinh viên:** Nguyễn Khắc Huy · **MSSV:** 2A202602036 · **Khóa:** K-3
+>
+> **Cách chạy nhanh:**
+> ```powershell
+> .\.venv\Scripts\Activate.ps1
+> cd src
+> python main.py --part 2   # guardrails (input/output/NeMo)
+> python main.py --part 3   # before/after + security pipeline
+> python main.py --part 4   # HITL router + approval lifecycle
+> $env:STUDENT_ID="2A202602036"; python main.py --part 5   # → outputs/results|audit_log|metrics.json
+> python main.py --part 1   # red team → outputs/attack_results.json
+> ```
+> Báo cáo: [`report/2A202602036_report.md`](report/2A202602036_report.md).
+> Thư viện thêm ngoài starter: `langchain`, `langchain-community` (để
+> `nemoguardrails` gọi Gemini) — đã thêm vào `requirements.txt`.
+
 Làm sao để ứng dụng agent an toàn hơn?
 
 **Hình thức:** bài tập **cá nhân** (1 người / 1 MSSV).

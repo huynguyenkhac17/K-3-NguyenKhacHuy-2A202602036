@@ -13,6 +13,7 @@ ngoài — LLM KHÔNG được tự quyết chính sách này.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -127,6 +128,32 @@ def _leaks_secret(text: str) -> bool:
     return any(s.lower() in low for s in _KNOWN_SECRETS)
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "429" in msg or "resource_exhausted" in msg or "quota" in msg
+
+
+async def _chat_with_retry(agent, runner, text, *, retries=5, cooldown=62.0):
+    """Gọi LLM, chờ trọn một cửa sổ phút khi gặp 429 (quota per-minute).
+
+    Vì sao cần: Gemini free tier giới hạn request/phút rất thấp. Không có retry
+    thì một lần chạm quota sẽ khiến câu hỏi HỢP LỆ bị ghi nhầm là 'blocked'
+    (LLM lỗi), làm sai kết quả đo phòng thủ. Thực nghiệm cho thấy backoff ngắn
+    (10→20→40s) không đủ vì cửa sổ tính theo phút; nên chờ trọn ~62s để cửa sổ
+    trượt hẳn rồi thử lại.
+    """
+    from core.utils import chat_with_agent
+
+    for attempt in range(retries + 1):
+        try:
+            return await chat_with_agent(agent, runner, text)
+        except Exception as e:
+            if _is_rate_limit_error(e) and attempt < retries:
+                await asyncio.sleep(cooldown)
+                continue
+            raise
+
+
 class DefensePipeline:
     """Chạy một câu hỏi qua toàn bộ chuỗi phòng thủ, ghi nhận lớp chặn.
 
@@ -146,8 +173,6 @@ class DefensePipeline:
 
     async def process(self, user_id: str, text: str) -> dict:
         """Đưa một message qua pipeline, trả về bản ghi kết quả."""
-        from core.utils import chat_with_agent
-
         self.monitor.total_requests += 1
         request_id = self.audit.record_input(user_id=user_id, text=text)
         user_content = types.Content(
@@ -186,7 +211,7 @@ class DefensePipeline:
 
         # --- Lớp 3: LLM ---
         try:
-            raw_response, _ = await chat_with_agent(self.agent, self.runner, text)
+            raw_response, _ = await _chat_with_retry(self.agent, self.runner, text)
         except Exception as e:
             return finish(True, "llm_error", f"Error: {type(e).__name__}: {e}")
 
@@ -266,42 +291,39 @@ EDGE_CASES = [
 ]
 
 
-async def _run_batch(pipeline: "DefensePipeline", queries, user_prefix):
+async def _run_batch(pipeline: "DefensePipeline", queries, user_prefix, *, pace=3.0):
     rows = []
     for i, q in enumerate(queries):
+        if i:
+            # Giãn nhịp để không dội quá giới hạn request/phút của Gemini.
+            await asyncio.sleep(pace)
         row = await pipeline.process(f"{user_prefix}-{i}", q)
         rows.append(row)
     return rows
 
 
-def _run_rate_limit_test(max_requests=10, window_seconds=60, sent=15):
+async def _run_rate_limit_test(max_requests=10, window_seconds=60, sent=15):
     """Test 3 — bắn nhiều request cùng user qua RIÊNG rate limiter.
 
     Chỉ đo lớp rate limiter (không gọi LLM) vì đó là đơn vị đang kiểm thử.
+    Async vì callback của plugin là async và hàm được gọi trong event loop.
     """
-    import asyncio
-
     limiter = RateLimitPlugin(max_requests=max_requests, window_seconds=window_seconds)
     ctx = SimpleNamespace(user_id="flood-user")
 
-    async def one():
-        content = types.Content(role="user", parts=[types.Part.from_text(text="balance?")])
-        return await limiter.on_user_message_callback(
+    passed = blocked = 0
+    for _ in range(sent):
+        content = types.Content(
+            role="user", parts=[types.Part.from_text(text="balance?")]
+        )
+        res = await limiter.on_user_message_callback(
             invocation_context=ctx, user_message=content
         )
+        if res is None:
+            passed += 1
+        else:
+            blocked += 1
 
-    async def run():
-        passed = blocked = 0
-        for _ in range(sent):
-            res = await one()
-            if res is None:
-                passed += 1
-            else:
-                blocked += 1
-        return passed, blocked
-
-    passed, blocked = asyncio.get_event_loop().run_until_complete(run()) \
-        if False else asyncio.run(run())
     return {
         "max_requests": max_requests,
         "window_seconds": window_seconds,
@@ -309,6 +331,41 @@ def _run_rate_limit_test(max_requests=10, window_seconds=60, sent=15):
         "passed": passed,
         "blocked": blocked,
     }
+
+
+async def _build_judge_sample(safe_rows, monitor, *, limit=3):
+    """Chấm LLM-as-Judge trên vài câu trả lời hợp lệ để lấp judge_sample.
+
+    Tách khỏi lớp chạy chính (vốn tắt judge để tiết kiệm quota). Chỉ chấm các
+    câu ĐÃ trả lời được (không phải lỗi), có giãn nhịp giữa các lần gọi.
+    """
+    samples = []
+    candidates = [
+        r for r in safe_rows
+        if not r["blocked"] and not (r["response_preview"] or "").startswith("Error:")
+    ][:limit]
+
+    for i, row in enumerate(candidates):
+        if i:
+            await asyncio.sleep(12)
+        monitor.judge_checks += 1
+        try:
+            verdict = await llm_safety_check(row["response_preview"])
+        except Exception:
+            # Chạm quota → bỏ qua mẫu này (judge_sample là tuỳ chọn trong schema).
+            monitor.judge_checks -= 1
+            continue
+        if not verdict.get("safe", True):
+            monitor.judge_fails += 1
+        samples.append({
+            "response_preview": row["response_preview"][:200],
+            "safety": verdict.get("safety", 5),
+            "relevance": verdict.get("relevance", 5),
+            "accuracy": verdict.get("accuracy", 5),
+            "tone": verdict.get("tone", 5),
+            "verdict": verdict.get("verdict", "PASS"),
+        })
+    return samples
 
 
 async def run_assignment_suite(pipeline, student_id: str) -> dict:
@@ -330,22 +387,30 @@ async def run_assignment_suite(pipeline, student_id: str) -> dict:
     # Agent nền là UNSAFE agent (có secret trong prompt) — để output guardrail
     # có thứ thật để phòng thủ. Cả pipeline chính là lớp biến nó thành an toàn.
     agent, runner = create_unsafe_agent()
-    use_judge = plugins[2].use_llm_judge
+    # Trong suite, tắt judge ở lớp chạy chính để GIẢM NỬA số LLM call (mỗi câu
+    # còn 1 call thay vì 2) — Gemini free tier giới hạn request/phút. Judge vẫn
+    # được chạy thật ở một lượt riêng bên dưới để lấp judge_sample.
     engine = DefensePipeline(
-        agent, runner, plugins, audit, monitor, use_llm_judge=use_judge
+        agent, runner, plugins, audit, monitor, use_llm_judge=False
     )
 
     print("Test 1 — safe queries…")
-    safe_rows = await _run_batch(engine, SAFE_QUERIES, "safe")
+    # Giãn 12s/câu để giữ dưới ~5 request/phút (RPM free tier); retry 62s là
+    # lưới dự phòng nếu vẫn chạm quota.
+    safe_rows = await _run_batch(engine, SAFE_QUERIES, "safe", pace=12.0)
     print("Test 2 — attack queries…")
-    attack_rows = await _run_batch(engine, ATTACK_QUERIES, "attack")
+    attack_rows = await _run_batch(engine, ATTACK_QUERIES, "attack", pace=1.0)
     print("Test 4 — edge cases…")
-    edge_rows = await _run_batch(engine, EDGE_CASES, "edge")
+    edge_rows = await _run_batch(engine, EDGE_CASES, "edge", pace=1.0)
 
     print("Test 3 — rate limit…")
-    rate_limit = _run_rate_limit_test()
+    rate_limit = await _run_rate_limit_test()
     # Ghi số lần chạm rate limit vào monitor để alert phản ánh Test 3.
     monitor.rate_limit_hits += rate_limit["blocked"]
+
+    # --- judge_sample: chấm thật vài câu trả lời hợp lệ (có giãn nhịp) ---
+    print("Judge sample…")
+    judge_sample = await _build_judge_sample(safe_rows, monitor, limit=3)
 
     result = {
         "student_id": student_id,
@@ -354,7 +419,7 @@ async def run_assignment_suite(pipeline, student_id: str) -> dict:
         "attack_queries": attack_rows,
         "rate_limit": rate_limit,
         "edge_cases": edge_rows,
-        "judge_sample": engine.judge_samples,
+        "judge_sample": judge_sample,
     }
 
     # --- Ghi 3 artifact nộp bài ---
