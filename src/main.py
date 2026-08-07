@@ -134,7 +134,11 @@ def part4_hitl():
     print("PART 4: Human-in-the-Loop Design")
     print("=" * 60)
 
-    from hitl.hitl import test_confidence_router, test_hitl_points
+    from hitl.hitl import (
+        test_confidence_router,
+        test_hitl_points,
+        test_approval_lifecycle,
+    )
 
     # TODO 11: Confidence Router
     print("\n--- TODO 11: Confidence Router ---")
@@ -143,6 +147,10 @@ def part4_hitl():
     # TODO 12: HITL Decision Points
     print("\n--- TODO 12: HITL Decision Points ---")
     test_hitl_points()
+
+    # TODO 12: vòng đời approve / reject / timeout + audit trail
+    print("\n--- TODO 12: Approval lifecycle ---")
+    test_approval_lifecycle()
 
 
 async def part5_assignment_suite():
