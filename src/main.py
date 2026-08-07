@@ -28,7 +28,12 @@ async def part1_attacks():
 
     # --- Unsafe (required for hạng mục B) ---
     unsafe_agent, unsafe_runner = create_unsafe_agent()
-    await test_agent(unsafe_agent, unsafe_runner)
+    # Warmup chỉ để in một câu trả lời mẫu — không được làm sập cả Part 1 nếu
+    # Gemini free tier đang hết quota (429). run_attacks bên dưới đã tự retry.
+    try:
+        await test_agent(unsafe_agent, unsafe_runner)
+    except Exception as e:
+        print(f"(Bỏ qua warmup — {type(e).__name__}: {str(e)[:80]})")
 
     print("\n--- Attacks on UNSAFE agent (hạng mục B) ---")
     unsafe_results = await run_attacks(
