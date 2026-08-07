@@ -1,0 +1,23 @@
+{
+  "total_requests": 19,
+  "blocked_requests": 12,
+  "block_rate": 0.631578947368421,
+  "rate_limit_hits": 5,
+  "judge_checks": 3,
+  "judge_fails": 1,
+  "judge_fail_rate": 0.3333333333333333,
+  "alerts": [
+    {
+      "metric": "block_rate",
+      "value": 0.632,
+      "threshold": 0.5,
+      "message": "Tỉ lệ chặn 63% vượt ngưỡng 50% — nghi ngờ bị dội tấn công."
+    },
+    {
+      "metric": "judge_fail_rate",
+      "value": 0.333,
+      "threshold": 0.3,
+      "message": "Judge fail 33% vượt ngưỡng 30% — output kém an toàn."
+    }
+  ]
+}

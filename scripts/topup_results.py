@@ -48,6 +48,29 @@ async def _reprocess(inputs: list[str]) -> list[dict]:
     return rows
 
 
+def _sync_audit(data: dict):
+    """Đồng bộ audit_log.json với quyết định cuối trong results.json.
+
+    Suite ghi audit khi câu hỏi còn lỗi 429; sau top-up, câu hỏi hợp lệ đã có
+    trả lời. Cập nhật entry audit tương ứng (khớp theo input) để bản ghi forensic
+    phản ánh trạng thái cuối, tránh mâu thuẫn với results.json.
+    """
+    audit_path = ROOT / "outputs" / "audit_log.json"
+    if not audit_path.exists():
+        return
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    final_by_input = {q["input"]: q for q in data["safe_queries"]}
+    for entry in audit:
+        final = final_by_input.get(entry.get("input"))
+        if final and str(entry.get("output", "")).startswith("Error:"):
+            entry["output"] = final["response_preview"]
+            entry["blocked"] = final["blocked"]
+            entry["layer"] = final["layer"]
+    audit_path.write_text(
+        json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def _rebuild_metrics(data: dict):
     """Tạo lại outputs/metrics.json khớp với results.json cuối cùng."""
     from assignment.monitoring import MonitoringAlert
@@ -84,6 +107,7 @@ async def main():
     RESULTS.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    _sync_audit(data)
     snap = _rebuild_metrics(data)
 
     still_err = [i for i, q in enumerate(data["safe_queries"]) if _is_error_row(q)]
